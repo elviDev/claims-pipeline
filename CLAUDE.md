@@ -44,13 +44,31 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 | ---- | ------------------------------------------------------------------------------------------ | -------- |
 | 1    | Synthetic claims and policies data with injected data problems (`src/generate_claims.py`)  | done     |
 | 2    | PySpark bronze / silver / gold + quality rules, quarantine, quality gate (`src/pipeline/`) | done     |
-| 3    | Fraud-risk model on `data/gold/fraud_features`, tracked with MLflow                        | **next** |
-| 4    | FastAPI service that scores a claim, in Docker                                             |          |
+| 3    | Fraud-risk model on `data/gold/fraud_features`, tracked with MLflow (`src/model/`)         | done     |
+| 4    | FastAPI service that scores a claim, in Docker                                             | **next** |
 | 5    | LLM extracts damage type and urgency from the claim description                            |          |
 | 6    | GitHub Actions: tests and Docker build on every push                                       |          |
 | 7    | Run the pipeline on Databricks Free Edition (Delta tables, `--format delta`)               |          |
 
-## Step 3 plan: fraud model + MLflow
+## Step 3 as built (notes for step 4)
+
+- Tests run in Docker (`docker compose run --rm pipeline pytest`); the local venv
+  is Python 3.14 without pyspark.
+- MLflow 3 tracking is `sqlite:///mlflow.db` (git-ignored), model files in
+  `mlruns/`. The file-based `mlruns/` store is deprecated. The UI runs in Docker
+  (`docker compose up mlflow`) because stored paths are `/app/mlruns/...`.
+- Load the model with `models:/claims-fraud-model@champion`. Its threshold is a
+  model version tag (`threshold`), plus `review_rate` and `model_type` tags.
+- The signature expects all numeric features as double; MLflow rejects int64.
+  The FastAPI request model should declare them as `float`.
+- Models are saved with skops; `SKOPS_TRUSTED_TYPES` in `train.py` lists the
+  extra type the tree model needs.
+- Scores come from `predict_proba` with `class_weight="balanced"`, so they rank
+  well but are not calibrated probabilities.
+- Model scores are close to the ceiling of the generated data (56% of fraud has
+  no red flag). Oracle ROC AUC 0.656 / PR AUC 0.089 on the test set.
+
+## Step 3 original plan: fraud model + MLflow
 
 Input: `data/gold/fraud_features` (parquet, one row per claim). Columns:
 `claim_id, product, region, channel, customer_age, claim_amount, annual_premium,

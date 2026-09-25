@@ -3,9 +3,12 @@
 # and the pipeline runs the same on Windows, Mac and Linux (and in CI later).
 FROM python:3.11-slim-bookworm
 
+# git: MLflow records which commit trained each model. The project folder is
+# mounted from the host and owned by a different user, so we tell git to trust it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openjdk-17-jre-headless procps \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends openjdk-17-jre-headless procps git \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory /app
 
 WORKDIR /app
 

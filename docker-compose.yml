@@ -3,6 +3,8 @@
 #   docker compose run --rm pipeline python src/generate_claims.py
 #   docker compose run --rm pipeline
 #   docker compose run --rm pipeline pytest
+#   docker compose run --rm pipeline python -m model.train
+#   docker compose up mlflow        # then open http://localhost:5000
 #
 # The project folder is mounted into the container, so code changes apply
 # right away without rebuilding, and the output lands in ./data on your machine.
@@ -14,3 +16,16 @@ services:
     volumes:
       - .:/app
     working_dir: /app
+
+  # The MLflow web UI, to browse runs and the model registry.
+  # It runs in Docker (not on Windows) because MLflow stores model file paths
+  # as they were inside the container (/app/mlruns/...).
+  mlflow:
+    image: claims-pipeline
+    volumes:
+      - .:/app
+    working_dir: /app
+    ports:
+      - "5000:5000"
+    # --host 0.0.0.0: listen for connections from outside the container.
+    command: mlflow ui --backend-store-uri sqlite:///mlflow.db --host 0.0.0.0 --port 5000
