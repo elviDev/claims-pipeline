@@ -1,0 +1,16 @@
+# Usage (from the project folder):
+#   docker compose build
+#   docker compose run --rm pipeline python src/generate_claims.py
+#   docker compose run --rm pipeline
+#   docker compose run --rm pipeline pytest
+#
+# The project folder is mounted into the container, so code changes apply
+# right away without rebuilding, and the output lands in ./data on your machine.
+
+services:
+  pipeline:
+    build: .
+    image: claims-pipeline
+    volumes:
+      - .:/app
+    working_dir: /app
