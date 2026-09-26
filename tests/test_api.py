@@ -11,8 +11,10 @@ import json
 import mlflow
 import pytest
 from fastapi.testclient import TestClient
+from openai import APITimeoutError
 
 from api.main import DEFAULT_MODEL_URI, app
+from llm.extract import LLMExtractor
 
 NORMAL_CLAIM = {
     "claim_id": "C-NORMAL",
@@ -48,6 +50,9 @@ def client(trained_registry):
     with pytest.MonkeyPatch.context() as env:
         env.setenv("MLFLOW_TRACKING_URI", trained_registry.tracking_uri)
         env.setenv("MODEL_URI", DEFAULT_MODEL_URI)
+        # .env is loaded inside the container. Remove the key so the API uses
+        # the fake extractor: tests must never call a real LLM.
+        env.delenv("LLM_API_KEY", raising=False)
         with TestClient(app) as test_client:
             yield test_client
     mlflow.set_tracking_uri(None)
@@ -60,6 +65,7 @@ def test_health_says_which_model_is_loaded(client):
     assert body["status"] == "ok"
     assert body["model_version"] == "1"          # a fresh registry, so the champion is version 1
     assert 0 < body["threshold"] < 1
+    assert body["extractor"] == "fake"
 
 
 # --- Scoring ------------------------------------------------------------------
@@ -137,3 +143,54 @@ def test_each_prediction_is_logged_as_json(client, caplog):
     assert logged["claim_id"] == "C-NORMAL"
     assert logged["model_version"] == "1"
     assert set(logged) >= {"fraud_score", "flagged", "latency_ms"}
+
+
+# --- Triage: fraud score + fields from the description ------------------------
+
+TRIAGE_CLAIM = {**NORMAL_CLAIM, "description": "Burst pipe in the bathroom flooded the hallway."}
+
+
+def test_triage_returns_score_and_extracted_fields(client):
+    response = client.post("/claims/triage", json=TRIAGE_CLAIM)
+    assert response.status_code == 200
+
+    body = response.json()
+    # The fraud part is exactly what /score gives for the same claim
+    assert body["fraud"] == client.post("/score", json=NORMAL_CLAIM).json()
+    assert body["extraction"]["damage_type"] == "water"
+    assert body["extraction"]["urgency"] == "high"
+
+
+def test_triage_says_when_no_llm_is_used(client):
+    body = client.post("/claims/triage", json=TRIAGE_CLAIM).json()
+    assert body["extraction"]["extractor"] == "fake"
+    assert "keyword rules" in body["note"]
+
+
+def test_triage_needs_a_description(client):
+    assert client.post("/claims/triage", json=NORMAL_CLAIM).status_code == 422
+    assert client.post("/claims/triage", json={**NORMAL_CLAIM, "description": ""}).status_code == 422
+
+
+class TimingOutClient:
+    """Stands in for openai.OpenAI(); every call times out, like an overloaded LLM server."""
+    def __init__(self):
+        self.chat = self
+        self.completions = self
+
+    def create(self, **request):
+        raise APITimeoutError(request=None)
+
+
+def test_llm_failure_still_returns_the_fraud_score(client):
+    """If the LLM is down, the claim still gets scored; the extraction is marked for a person."""
+    original = app.state.extractor
+    app.state.extractor = LLMExtractor(model="down", client=TimingOutClient())
+    try:
+        body = client.post("/claims/triage", json=TRIAGE_CLAIM).json()
+    finally:
+        app.state.extractor = original
+
+    assert 0 <= body["fraud"]["fraud_score"] <= 1
+    assert body["extraction"]["needs_manual_review"] is True
+    assert body["note"] is None                 # it was a real LLM, it just failed

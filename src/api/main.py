@@ -1,8 +1,11 @@
 """
-Step 4: an API that scores a new claim for fraud risk.
+Steps 4 and 5: an API that scores a new claim for fraud risk, and reads its
+description with an LLM.
 
 A claims system sends a raw claim (dates, amount, policy details) and gets
 back a fraud score and whether the claim should go to a human for review.
+/claims/triage also takes the free-text description and returns structured
+fields (damage type, urgency, ...) to route the claim on.
 
 Run it:
     uvicorn api.main:app --port 8000          (then open http://localhost:8000/docs)
@@ -10,6 +13,8 @@ Run it:
 Settings, from environment variables:
     MODEL_URI            which model to serve    (default models:/claims-fraud-model@champion)
     MLFLOW_TRACKING_URI  where the registry is   (default sqlite:///mlflow.db)
+    LLM_API_KEY, LLM_MODEL, LLM_BASE_URL   the LLM (see .env.example); without
+                         them, /claims/triage uses keyword rules and says so
 """
 
 import json
@@ -28,6 +33,8 @@ from mlflow import MlflowClient
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.features import build_features
+from llm.extract import Extractor, get_extractor
+from llm.schema import Extraction
 from model.train import CHAMPION_ALIAS, DEFAULT_TRACKING_URI, MEDIANS_ARTIFACT, REGISTERED_MODEL
 
 DEFAULT_MODEL_URI = f"models:/{REGISTERED_MODEL}@{CHAMPION_ALIAS}"
@@ -88,6 +95,18 @@ class Score(BaseModel):
     flag_for_review: bool = Field(description="True if fraud_score >= threshold")
     threshold: float
     model_version: str
+
+
+class TriageRequest(Claim):
+    """A claim plus the customer's own description of what happened."""
+    description: str = Field(min_length=1, max_length=2000,
+                             examples=["Burst pipe in the bathroom flooded the hallway."])
+
+
+class TriageResponse(BaseModel):
+    fraud: Score
+    extraction: Extraction
+    note: str | None = Field(default=None, description="Set when the fields come from keyword rules, not an LLM")
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +173,9 @@ async def lifespan(app: FastAPI):
     """
     mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", DEFAULT_TRACKING_URI))
     app.state.scorer = load_scorer(os.getenv("MODEL_URI", DEFAULT_MODEL_URI))
+    # The LLM if one is configured in .env, otherwise keyword rules. Picked
+    # once here, so every request uses the same one and /health can say which.
+    app.state.extractor = get_extractor()
     yield
 
 
@@ -198,6 +220,7 @@ def health(request: Request) -> dict:
         "model_version": scorer.version,
         "model_type": scorer.model_type,
         "threshold": scorer.threshold,
+        "extractor": request.app.state.extractor.name,
     }
 
 
@@ -216,3 +239,35 @@ def score_batch(claims: list[Claim], request: Request) -> list[Score]:
     if not claims:
         return []
     return score_and_log(request, claims)
+
+
+@app.post("/claims/triage")
+def triage(claim: TriageRequest, request: Request) -> TriageResponse:
+    """
+    Fraud score and the fields read from the description, in one answer.
+
+    A plain `def`, not `async def`, on purpose: an LLM call on a CPU takes
+    seconds, and FastAPI runs plain `def` endpoints in a thread pool. So one
+    slow extraction doesn't freeze /health or /score for everyone else.
+
+    The two parts are independent. If the LLM fails, the fraud score still
+    comes back, and the extraction says needs_manual_review=true.
+    """
+    fraud = score_and_log(request, [claim])[0]
+
+    extractor: Extractor = request.app.state.extractor
+    start = time.perf_counter()
+    extraction = extractor.extract(claim.description)
+    prediction_log.info(json.dumps({
+        "claim_id": claim.claim_id,
+        "extractor": extraction.extractor,
+        "damage_type": extraction.damage_type,
+        "urgency": extraction.urgency,
+        "needs_manual_review": extraction.needs_manual_review,
+        "extraction_ms": round((time.perf_counter() - start) * 1000, 1),
+    }))
+
+    note = None
+    if extraction.extractor == "fake":
+        note = "No LLM configured: these fields come from simple keyword rules."
+    return TriageResponse(fraud=fraud, extraction=extraction, note=note)

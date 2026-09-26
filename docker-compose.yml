@@ -17,6 +17,11 @@ services:
     volumes:
       - .:/app
     working_dir: /app
+    # LLM settings (step 5). required: false, so everything still runs without
+    # a .env file, e.g. in CI. Then the app uses the fake extractor.
+    env_file:
+      - path: .env
+        required: false
 
   # The MLflow web UI, to browse runs and the model registry.
   # It runs in Docker (not on Windows) because MLflow stores model file paths
@@ -45,6 +50,11 @@ services:
       MODEL_URI: models:/claims-fraud-model@champion
       MLFLOW_TRACKING_URI: sqlite:///mlflow.db
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    # LLM settings (step 5). required: false, so everything still runs without
+    # a .env file, e.g. in CI. Then the app uses the fake extractor.
+    env_file:
+      - path: .env
+        required: false
     # Docker calls /health every 10 seconds and marks the container healthy or
     # unhealthy. Kubernetes does the same with a "readiness probe", and only
     # sends traffic to copies of the API that answer.
