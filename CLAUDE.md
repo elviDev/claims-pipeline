@@ -45,7 +45,7 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 | 1    | Synthetic claims and policies data with injected data problems (`src/generate_claims.py`)  | done     |
 | 2    | PySpark bronze / silver / gold + quality rules, quarantine, quality gate (`src/pipeline/`) | done     |
 | 3    | Fraud-risk model on `data/gold/fraud_features`, tracked with MLflow (`src/model/`)         | done     |
-| 4    | FastAPI service that scores a claim, in Docker                                             | **next** |
+| 4    | FastAPI service that scores a claim, in Docker (`src/api/`)                                | **next** |
 | 5    | LLM extracts damage type and urgency from the claim description                            |          |
 | 6    | GitHub Actions: tests and Docker build on every push                                       |          |
 | 7    | Run the pipeline on Databricks Free Edition (Delta tables, `--format delta`)               |          |
@@ -68,40 +68,118 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 - Model scores are close to the ceiling of the generated data (56% of fraud has
   no red flag). Oracle ROC AUC 0.656 / PR AUC 0.089 on the test set.
 
-## Step 3 original plan: fraud model + MLflow
+## Step 4 plan: FastAPI scoring service in Docker
 
-Input: `data/gold/fraud_features` (parquet, one row per claim). Columns:
-`claim_id, product, region, channel, customer_age, claim_amount, annual_premium,
-days_since_policy_start, report_delay_days, amount_vs_product_median,
-amount_vs_premium, is_fraud`. Fraud rate is about 3%.
+Goal: a claims system sends a new claim, the API answers with a fraud score and
+whether it should go to a human for review. The Swagger page (`/docs`) is the
+live demo screen at the job fair.
+
+Elvis already knows FastAPI well (see his ai-document-intelligence repo), so
+spend the explaining on the MLOps parts, not the FastAPI basics.
 
 Build:
 
-- `src/model/train.py`: load features with pandas, stratified train/test split,
-  scikit-learn Pipeline (OneHotEncoder for product/region/channel, numeric
-  features passed through or scaled), train a LogisticRegression baseline and a
-  tree model (e.g. HistGradientBoostingClassifier). Handle the class imbalance
-  (class_weight="balanced").
-- Metrics that make sense for rare fraud: ROC AUC, PR AUC (average precision),
-  precision and recall at the chosen threshold, confusion matrix. Explain why
-  accuracy is misleading at 3% fraud (predicting "never fraud" scores 97%).
-- MLflow: log params, metrics, the confusion matrix as an artifact, and the model
-  with a signature and input example. Register the best model in the local model
-  registry as `claims-fraud-model`. Local tracking in `mlruns/` (already
-  git-ignored). View with `mlflow ui`.
-- `tests/test_model.py`: model trains on a small generated sample, predictions are
-  probabilities between 0 and 1, the saved model loads and scores one claim.
-- Add `scikit-learn` and `mlflow` to requirements.txt.
-- Update README (roadmap, a "Fraud model" section with results and how to run it).
+- `src/api/main.py`
+  - Load the model **once at startup** (FastAPI lifespan), from
+    `models:/claims-fraud-model@champion`. Read the `threshold` and model version
+    from the registry with `MlflowClient`. Model URI and tracking URI come from
+    env vars (`MODEL_URI`, `MLFLOW_TRACKING_URI`) with the current defaults.
+  - `GET /health`: status plus which model version is loaded. This is what a
+    load balancer or Kubernetes probe would call.
+  - `POST /score`: one claim in, returns `fraud_score`, `flag_for_review`
+    (score >= threshold), `threshold`, `model_version`.
+  - `POST /score/batch`: a list of claims, for a nightly job.
+- **The request is a raw claim, not the model features.** The claims system
+  knows dates, amounts and the policy; it doesn't know `days_since_policy_start`
+  or `amount_vs_product_median`. So the API computes the features itself in
+  `src/api/features.py`.
+  - This is the main lesson of the step: **training/serving skew**. If the API
+    computes a feature slightly differently from the gold layer, the model gets
+    inputs it never saw in training and the scores are quietly wrong, with no error.
+  - `amount_vs_product_median` needs the per-product medians from training.
+    Small change to `train.py`: save the medians as a JSON artifact with the
+    model (e.g. `product_medians.json`), and the API loads them together with
+    the model. Then the medians always match the model version.
+  - Add a **skew test**: take some claims, compute features with the Spark gold
+    code and with the API code, assert they match.
+- Request model (pydantic): `product`, `region`, `channel` as `Literal[...]` of
+  the known values; dates as `date`; amounts as `float` with `gt=0`; reject a
+  report date before the incident date. The same rules as the silver layer, so
+  bad input gets a clear 422 instead of a meaningless score.
+- Log one line per prediction (claim_id, score, flagged, model version, latency).
+  That log is the raw material for monitoring later (MLOps Zoomcamp module 5).
+- Docker: add an `api` service to `docker-compose.yml` using the same image,
+  port 8000, command `uvicorn api.main:app --host 0.0.0.0 --port 8000`. Add
+  `fastapi`, `uvicorn[standard]`, `httpx` to requirements.
+- `tests/test_api.py` with `TestClient`: train a tiny model into a temporary
+  MLflow tracking URI in a fixture (reuse the helpers from `test_model.py`),
+  then test: health works, a normal claim gets a score between 0 and 1, a claim
+  with red flags scores higher than a normal one, bad input returns 422.
+- README: "Scoring API" section with a curl example and a screenshot of `/docs`.
 
-Things worth explaining to Elvis in step 3:
+Worth explaining:
 
-- Why a simple baseline first (so you know if the fancy model is actually better).
-- Why PR AUC matters more than accuracy for rare events.
-- What MLflow gives you: every run recorded with its settings and results, so
-  you can compare runs and know exactly which model is deployed.
-- The model is deliberately simple. For a data engineer role, the value is the
-  pipeline, tracking and deployment around it, not squeezing out accuracy.
-- Honest caveat: `amount_vs_product_median` is computed over all claims before
-  the split, a mild form of leakage. Fine for a demo, and a good thing to be
-  able to point out if asked.
+- Why load the model at startup and not per request (speed; one fixed version).
+- Why the API loads `@champion` and not a version number: promoting or rolling
+  back a model is moving the alias, with no code change or redeploy.
+- Training/serving skew, and how the skew test and shared medians prevent it.
+- What would change in production: an MLflow server or Databricks Model Serving
+  instead of a local sqlite file, the model baked into the image or pulled at
+  deploy, several API replicas behind a load balancer (Kubernetes), health
+  checks.
+
+## Step 5 plan: LLM reads the claim description
+
+Goal: turn the free-text description ("Burst pipe in the bathroom flooded the
+hallway.") into structured fields a claims handler can route on. This covers
+the "LLM products" part of the job. Elvis knows the OpenAI API and RAG already.
+
+Build:
+
+- `src/llm/schema.py`: pydantic model for the output:
+  `damage_type` (Literal: collision, theft, water, fire, weather, lost_luggage,
+  travel_disruption, medical, other), `urgency` (low / medium / high),
+  `injury_mentioned` (bool), `third_party_involved` (bool), `summary` (short str).
+- `src/llm/extract.py`
+  - A small interface (`Extractor` with `extract(description) -> ClaimInfo`)
+    with two implementations: a real LLM one, and a `FakeExtractor` (simple
+    keyword rules) used in tests and when no API key is set. Tests and CI must
+    never call a paid API.
+  - Ask Elvis which provider he has a key for; keep the provider code in one
+    place so it's easy to swap.
+  - Use the provider's structured output / JSON mode, then **validate with
+    pydantic anyway**. If the output is invalid, retry once, then return
+    `damage_type="other"` with a `needs_manual_review` flag. Never pass
+    unvalidated LLM output downstream.
+  - Temperature 0, so the same description gives the same answer.
+  - Cache by a hash of the description. The generator reuses templates, and in
+    real life cost and latency matter.
+  - API key from `.env` (already git-ignored), loaded via `env_file` in compose.
+    Add a `.env.example` with the variable name and no value.
+- **Evaluation** (`src/llm/evaluate.py`): the generator's description templates
+  are known, so build a labelled set (template -> expected damage_type and
+  urgency, ~20 to 30 cases, include a few tricky ones). Run the extractor,
+  measure accuracy per field, log the results to MLflow as its own experiment
+  (`claims-llm-extraction`) with the prompt version as a param. "How do you know
+  the LLM works? I measured it" is the point to make in the interview.
+- Wire it in:
+  - API: `POST /claims/triage` returns the fraud score and the extracted fields
+    in one answer. If no LLM key is configured, use the fake extractor and say
+    so in the response.
+  - Optional batch: enrich silver claims into a `gold/claims_enriched` table.
+- Tests with the fake extractor and a mocked client: valid output parses,
+  invalid JSON triggers the fallback, the cache avoids a second call.
+- README: "LLM extraction" section with the eval results table.
+
+Worth explaining:
+
+- Why structured output plus validation (LLMs sometimes return junk).
+- Why a fake extractor (tests must be fast, free and work offline).
+- Why evaluate with a labelled set, and track it in MLflow like the fraud model.
+- **Privacy**, important for an insurer: claim descriptions contain personal
+  data. In a real deployment you'd mask names and addresses before sending
+  text out, or use a model hosted inside the company's cloud in the EU (for
+  example Azure OpenAI or AWS Bedrock in an EU region). GDPR applies.
+- RAG vs this: this is extraction, not retrieval. RAG would fit a different
+  feature, like answering "is this covered by my policy?" from policy documents,
+  which ties back to his existing RAG project.
