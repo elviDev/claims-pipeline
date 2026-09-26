@@ -6,46 +6,23 @@ silver/gold code, so if someone changes the gold table in a way that breaks
 the model, these tests catch it.
 """
 
-import os
-
 import mlflow
-import numpy as np
 import pandas as pd
 import pytest
 
-from generate_claims import generate_claims, generate_policies
 from model.train import (
     CHAMPION_ALIAS,
+    MEDIANS_ARTIFACT,
     MODEL_PARAMS,
     REGISTERED_MODEL,
     build_model,
     fraud_scores,
     load_features,
     pick_threshold,
-    run,
     split,
 )
-from pipeline.bronze import read_raw_csv
-from pipeline.gold import build_fraud_features
-from pipeline.silver import build_silver_claims, build_silver_policies
 
-
-@pytest.fixture(scope="module")
-def features_path(spark, tmp_path_factory):
-    """Generate a small dataset and run it through silver and gold. Returns the gold folder."""
-    tmp = tmp_path_factory.mktemp("model_data")
-    rng = np.random.default_rng(7)
-    policies = generate_policies(300, rng)
-    # No add_dirty_data here: the pipeline tests already cover that. The model only sees clean gold rows.
-    generate_claims(policies, 2000, rng).to_csv(tmp / "claims.csv", index=False)
-    policies.to_csv(tmp / "policies.csv", index=False)
-
-    silver_policies, _, _ = build_silver_policies(read_raw_csv(spark, str(tmp / "policies.csv")))
-    silver_claims, _, _ = build_silver_claims(read_raw_csv(spark, str(tmp / "claims.csv")), silver_policies)
-
-    path = tmp / "fraud_features"
-    build_fraud_features(silver_claims, silver_policies).write.parquet(str(path))
-    return path
+# features_path and trained_registry live in conftest.py, shared with the API tests.
 
 
 @pytest.fixture(scope="module")
@@ -54,22 +31,11 @@ def data(features_path):
 
 
 @pytest.fixture(scope="module")
-def trained(features_path, tmp_path_factory):
-    """
-    Run the full training script once, in a temp folder.
-
-    MLflow writes mlflow.db and mlruns/ into the current folder, so we move
-    there first. Otherwise every test run would add fake runs to the real registry.
-    """
-    workdir = tmp_path_factory.mktemp("mlflow")
-    old_cwd = os.getcwd()
-    os.chdir(workdir)
-    try:
-        metrics = run(features_path, review_rate=0.1, tracking_uri="sqlite:///mlflow.db")
-        yield metrics
-    finally:
-        os.chdir(old_cwd)
-        mlflow.set_tracking_uri(None)  # back to the default, so later tests aren't affected
+def trained(trained_registry):
+    """Point MLflow at the test registry for this module. Returns the metrics per model."""
+    mlflow.set_tracking_uri(trained_registry.tracking_uri)
+    yield trained_registry.metrics
+    mlflow.set_tracking_uri(None)
 
 
 # --- Data --------------------------------------------------------------------
@@ -137,3 +103,16 @@ def test_registered_model_loads_and_scores_one_claim(trained):
 
     assert scores.shape == (1, 2)
     assert 0 <= scores[0][1] <= 1
+
+
+def test_champion_has_medians_that_rebuild_the_gold_feature(trained, data):
+    """
+    The API rebuilds amount_vs_product_median from these medians. If they
+    didn't reproduce the gold column exactly, the API would feed the model
+    numbers it never saw in training.
+    """
+    version = mlflow.MlflowClient().get_model_version_by_alias(REGISTERED_MODEL, CHAMPION_ALIAS)
+    medians = mlflow.artifacts.load_dict(f"runs:/{version.run_id}/{MEDIANS_ARTIFACT}")
+
+    rebuilt = (data["claim_amount"] / data["product"].map(medians)).round(3)
+    assert (rebuilt == data["amount_vs_product_median"]).all()

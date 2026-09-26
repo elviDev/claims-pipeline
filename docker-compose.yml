@@ -5,6 +5,7 @@
 #   docker compose run --rm pipeline pytest
 #   docker compose run --rm pipeline python -m model.train
 #   docker compose up mlflow        # then open http://localhost:5000
+#   docker compose up api           # then open http://localhost:8000/docs
 #
 # The project folder is mounted into the container, so code changes apply
 # right away without rebuilding, and the output lands in ./data on your machine.
@@ -29,3 +30,26 @@ services:
       - "5000:5000"
     # --host 0.0.0.0: listen for connections from outside the container.
     command: mlflow ui --backend-store-uri sqlite:///mlflow.db --host 0.0.0.0 --port 5000
+
+  # The fraud scoring API. Loads the @champion model from the registry at startup.
+  api:
+    image: claims-pipeline
+    volumes:
+      - .:/app
+    working_dir: /app
+    ports:
+      - "8000:8000"
+    environment:
+      # Which model to serve. To roll out or roll back a model, move the alias in
+      # MLflow and restart the API. This setting stays the same.
+      MODEL_URI: models:/claims-fraud-model@champion
+      MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    # Docker calls /health every 10 seconds and marks the container healthy or
+    # unhealthy. Kubernetes does the same with a "readiness probe", and only
+    # sends traffic to copies of the API that answer.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s

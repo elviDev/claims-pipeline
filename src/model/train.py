@@ -89,6 +89,21 @@ def load_features(path: str | Path) -> pd.DataFrame:
     return df
 
 
+def product_medians(df: pd.DataFrame) -> dict[str, float]:
+    """
+    The median claim amount per product, e.g. {"auto": 1793.28, ...}.
+
+    The gold layer divides each claim by these to get amount_vs_product_median.
+    The API has to do the same division for a new claim, with exactly the
+    same numbers, so we save them next to the model (see train_and_log).
+
+    Computed over every row, like gold does (F.median over all claims of the
+    product). That's the known leakage shortcut from the README, but it's
+    what the model was trained on, so it's what the API must use.
+    """
+    return {product: float(m) for product, m in df.groupby("product")["claim_amount"].median().items()}
+
+
 def split(df: pd.DataFrame, test_size: float = 0.2, seed: int = 42):
     """
     Hold back part of the data to test on. Returns X_train, X_test, y_train, y_test.
@@ -260,6 +275,7 @@ def plot_confusion_matrix(matrix: np.ndarray, title: str):
 EXPERIMENT = "claims-fraud"
 REGISTERED_MODEL = "claims-fraud-model"
 CHAMPION_ALIAS = "champion"
+MEDIANS_ARTIFACT = "product_medians.json"
 
 # Run records (settings, metrics, registry) go in a small SQLite database file.
 # The model files themselves go in mlruns/. Both are git-ignored: they're
@@ -300,6 +316,10 @@ def train_and_log(name: str, data: pd.DataFrame, features_path: str, review_rate
             warnings.simplefilter("ignore", UserWarning)
             dataset = mlflow.data.from_pandas(data, source=features_path, name="fraud_features", targets=TARGET)
             mlflow.log_input(dataset, context="training")
+
+        # Saved in the same run as the model, so whichever version is champion,
+        # the API loads the medians that belong to it. They can't drift apart.
+        mlflow.log_dict(product_medians(data), MEDIANS_ARTIFACT)
 
         model = build_model(name).fit(X_train, y_train)
         threshold = pick_threshold(model, X_train, review_rate)
