@@ -14,7 +14,7 @@ in insurance (Spark / Databricks, MLflow, Docker, CI/CD, LLMs).
 | 1 | Synthetic claims and policies data, with realistic data quality problems | ✅ |
 | 2 | Bronze / silver / gold layers in PySpark, with data quality checks | ✅ |
 | 3 | Fraud-risk model, tracked with MLflow | ✅ |
-| 4 | FastAPI service that scores a claim, running in Docker | ⏳ |
+| 4 | FastAPI service that scores a claim, running in Docker | ✅ |
 | 5 | LLM step: extract damage type and urgency from the claim description | ⏳ |
 | 6 | GitHub Actions: tests and Docker build on every push | ⏳ |
 | 7 | Run the pipeline on Databricks | ⏳ |
@@ -122,6 +122,63 @@ so deploying a new model means moving the alias, not changing code.
 Run records and the registry are stored in `mlflow.db` (SQLite), model files in
 `mlruns/`. Both are git-ignored and rebuilt by running the training script.
 
+## Scoring API
+
+`src/api/` is a FastAPI service. A claims system sends a new claim and gets
+back a fraud score and whether a human should review it.
+
+```bash
+docker compose up api          # interactive docs on http://localhost:8000/docs
+```
+
+```bash
+curl -X POST localhost:8000/score -H "Content-Type: application/json" -d '{
+  "claim_id": "CLM-DEMO-1", "product": "auto", "region": "Madrid", "channel": "web",
+  "customer_age": 42, "claim_amount": 6000, "annual_premium": 600,
+  "policy_start_date": "2024-01-01", "incident_date": "2024-01-08", "report_date": "2024-02-10"
+}'
+```
+
+```json
+{"claim_id": "CLM-DEMO-1", "fraud_score": 0.882, "flag_for_review": true, "threshold": 0.7588, "model_version": "3"}
+```
+
+| Endpoint | What it does |
+|----------|--------------|
+| `GET /health` | Status and which model version is loaded. Also used by the Docker healthcheck. |
+| `POST /score` | One claim in, score and review flag out |
+| `POST /score/batch` | A list of claims, e.g. for a nightly job |
+
+**Loaded once, at startup.** The API asks the registry which version is
+`@champion`, then loads that version's model, threshold and product medians
+together, so they always match. If the model can't be loaded, the server
+doesn't start. To deploy or roll back a model, move the alias in MLflow and
+restart the API. No code change.
+
+**Raw claims in, features computed by the API.** The claims system knows dates
+and amounts, not `days_since_policy_start`. So `src/api/features.py` computes
+the features the same way the Spark gold layer does. If the two ever differed,
+the model would get inputs it never saw in training and return quietly wrong
+scores (training/serving skew). Two things prevent that:
+- the product medians come from the model's own MLflow run, not recomputed
+- `tests/test_features.py` runs the same claims through Spark and through the
+  API code, and fails if any feature differs. Changing one rounding from 3 to 2
+  decimals makes it fail on 1,331 claims.
+
+**Bad input gets a 422, not a score.** The request rules match the silver
+quality rules: amounts above zero, report date not before incident date, and
+only products, regions and channels the model was trained on.
+
+**One JSON log line per prediction** (claim id, score, flag, model version,
+latency). Raw material for monitoring: is the flag rate still about 5%, are
+scores drifting, is it getting slower?
+
+**What would change in production:** a shared MLflow server (or Databricks
+Model Serving) instead of a local SQLite file; the model pulled at deploy time
+or baked into the image; several copies of the API behind a load balancer on
+Kubernetes, using `/health` as the readiness probe; and the prediction logs
+shipped to a monitoring tool.
+
 ## Running it
 
 ### With Docker (recommended, works the same on Windows, Mac and Linux)
@@ -136,6 +193,7 @@ docker compose run --rm pipeline                     # runs the pipeline
 docker compose run --rm pipeline python -m model.train   # trains and registers the model
 docker compose run --rm pipeline pytest              # runs the tests
 docker compose up mlflow                             # MLflow UI on http://localhost:5000
+docker compose up api                                # scoring API on http://localhost:8000/docs
 ```
 
 Output lands in `data/`, `mlflow.db` and `mlruns/` on your machine.
@@ -154,6 +212,7 @@ PYTHONPATH=src python -m pipeline.run_pipeline
 PYTHONPATH=src python -m model.train
 pytest
 mlflow ui --backend-store-uri sqlite:///mlflow.db
+PYTHONPATH=src uvicorn api.main:app --port 8000
 ```
 
 ## Project structure
@@ -170,7 +229,10 @@ src/
     run_pipeline.py      runs everything, applies the quality gate
   model/
     train.py             step 3: train, evaluate, log to MLflow, register
-tests/                   27 tests: pipeline rules, end to end, and the model
+  api/
+    features.py          step 4: raw claim -> model features (mirrors gold.py)
+    main.py              step 4: FastAPI app, loads @champion at startup
+tests/                   49 tests: pipeline rules, model, skew test, API
 ```
 
 ## The data

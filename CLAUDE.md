@@ -45,8 +45,8 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 | 1    | Synthetic claims and policies data with injected data problems (`src/generate_claims.py`)  | done     |
 | 2    | PySpark bronze / silver / gold + quality rules, quarantine, quality gate (`src/pipeline/`) | done     |
 | 3    | Fraud-risk model on `data/gold/fraud_features`, tracked with MLflow (`src/model/`)         | done     |
-| 4    | FastAPI service that scores a claim, in Docker (`src/api/`)                                | **next** |
-| 5    | LLM extracts damage type and urgency from the claim description                            |          |
+| 4    | FastAPI service that scores a claim, in Docker (`src/api/`)                                | done     |
+| 5    | LLM extracts damage type and urgency from the claim description                            | **next** |
 | 6    | GitHub Actions: tests and Docker build on every push                                       |          |
 | 7    | Run the pipeline on Databricks Free Edition (Delta tables, `--format delta`)               |          |
 
@@ -68,7 +68,24 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 - Model scores are close to the ceiling of the generated data (56% of fraud has
   no red flag). Oracle ROC AUC 0.656 / PR AUC 0.089 on the test set.
 
-## Step 4 plan: FastAPI scoring service in Docker
+## Step 4 as built (notes for step 5)
+
+- `src/api/main.py`: `Scorer` holds model + version + threshold + medians, loaded
+  once in the lifespan by resolving the alias to a version first. Endpoints
+  `/health`, `/score`, `/score/batch`. Add `/claims/triage` next to them.
+- `src/api/features.py`: `build_features(raw_df, medians)` mirrors gold.py.
+  `tests/test_features.py` has the Spark-vs-API skew test.
+- `train.py` logs `product_medians.json` in each run (`MEDIANS_ARTIFACT`).
+- Shared test fixtures in `tests/conftest.py`: `features_path` and
+  `trained_registry` (session scoped, temp MLflow registry). `test_api.py`
+  starts the app with `TestClient` against it.
+- Starlette wants `httpx2` (not `httpx`) for `TestClient`.
+- MLflow 3 returns model version numbers as int; the API reports them as str.
+- `docker compose up api` on port 8000, healthcheck calls `/health`.
+- Docker Desktop has been slow at times; long test runs can exceed 10 minutes
+  to start. Run them in the background.
+
+## Step 4 original plan: FastAPI scoring service in Docker
 
 Goal: a claims system sends a new claim, the API answers with a fraud score and
 whether it should go to a human for review. The Swagger page (`/docs`) is the
