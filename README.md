@@ -15,7 +15,7 @@ in insurance (Spark / Databricks, MLflow, Docker, CI/CD, LLMs).
 | 2 | Bronze / silver / gold layers in PySpark, with data quality checks | ✅ |
 | 3 | Fraud-risk model, tracked with MLflow | ✅ |
 | 4 | FastAPI service that scores a claim, running in Docker | ✅ |
-| 5 | LLM step: extract damage type and urgency from the claim description | ⏳ |
+| 5 | LLM step: extract damage type and urgency from the claim description | ✅ |
 | 6 | GitHub Actions: tests and Docker build on every push | ⏳ |
 | 7 | Run the pipeline on Databricks | ⏳ |
 
@@ -179,6 +179,76 @@ or baked into the image; several copies of the API behind a load balancer on
 Kubernetes, using `/health` as the readiness probe; and the prediction logs
 shipped to a monitoring tool.
 
+## LLM extraction
+
+Each claim has a free-text description. `src/llm/` turns it into fields a
+claims handler can route on:
+
+```
+"Burst pipe in the bathroom flooded the hallway."
+  -> damage_type=water, urgency=high, injury_mentioned=false,
+     third_party_involved=false, summary="Bathroom burst pipe caused flooding in hallway."
+```
+
+`POST /claims/triage` takes a claim plus its description and returns the fraud
+score and these fields in one answer.
+
+**How it works.** The LLM is called through the `openai` package with a
+configurable `base_url`, so the same code talks to Ollama on a laptop or to
+OpenAI by changing `.env` (see `.env.example`). Temperature 0, and the JSON
+schema is sent with the request so the model is constrained to the right
+shape. The answer is then **validated with pydantic anyway**: allowed values
+only, summary under 200 characters. If it's invalid, the retry shows the model
+its answer and the error. After two failures the claim gets
+`damage_type=other, needs_manual_review=true` for a person to read. Results are
+cached by a hash of the description. If the LLM is down, `/claims/triage` still
+returns the fraud score.
+
+**A fake extractor** (keyword rules) has the same interface. Tests and CI use
+it, so they never call a real model, and so does the API when no LLM is
+configured (the response says so). It's also the baseline the LLM has to beat.
+
+**Evaluation.** `src/llm/evaluate.py` runs an extractor over 29 labelled
+descriptions: the generator's 18 templates, plus 11 harder texts it never
+produces (a tree falling on a car, a late suitcase, one in Spanish). Each run
+is logged to MLflow (experiment `claims-llm-extraction`) with the model name,
+prompt version, accuracy per field, and every case with expected vs actual.
+Run on a laptop CPU with Ollama:
+
+| Extractor | Damage type | Urgency | Injury | Third party | All 4 right | Templates | New text | Sec / claim |
+|-----------|-------------|---------|--------|-------------|-------------|-----------|----------|-------------|
+| Keyword rules | 83% | **76%** | 97% | 93% | **66%** | **94%** | 18% | 0.0 |
+| qwen2.5:0.5b | 59% | 28% | 83% | 66% | 17% | 11% | 27% | 1.2 |
+| gemma3:1b | 76% | 41% | 90% | 38% | 10% | 17% | 0% | 3.3 |
+| **qwen2.5:3b** | **86%** | 45% | **100%** | 93% | 38% | 28% | **55%** | 6.5 |
+
+What it shows:
+- The keyword rules win on the templates they were written from (94%) and
+  collapse on new wording (18%). "Train was 3 hours late" comes out as weather,
+  because "train" contains "rain".
+- qwen2.5:3b copes much better with new text (55%), including Spanish, and is
+  the best at damage type and injury. The smaller models are worse than the
+  rules, each in its own way: the 0.5B model calls nearly everything urgent,
+  gemma3:1b says a third party was involved in almost every claim.
+- Urgency is the weak field for every LLM. Its rules are the fuzziest.
+
+The fake extractor's keywords come only from the generator templates. My first
+version also used words from the evaluation cases, which scored 86% and was
+tuning on the test set. Improving the prompt against these same 29 cases would
+be the same mistake: a v2 prompt needs a separate held-out set to be measured on.
+
+**Privacy.** Claim descriptions contain personal data. Here the model runs
+locally, so nothing leaves the machine. In a real deployment at an insurer you'd
+mask names and addresses before sending text anywhere, or use a model hosted in
+the company's own cloud in the EU (for example Azure OpenAI or AWS Bedrock in an
+EU region), because GDPR applies.
+
+```bash
+docker compose run --rm pipeline python -m llm.evaluate --fake            # baseline
+docker compose run --rm pipeline python -m llm.evaluate                   # model from .env
+docker compose run --rm -e LLM_MODEL=gemma3:1b pipeline python -m llm.evaluate
+```
+
 ## Running it
 
 ### With Docker (recommended, works the same on Windows, Mac and Linux)
@@ -194,7 +264,11 @@ docker compose run --rm pipeline python -m model.train   # trains and registers 
 docker compose run --rm pipeline pytest              # runs the tests
 docker compose up mlflow                             # MLflow UI on http://localhost:5000
 docker compose up api                                # scoring API on http://localhost:8000/docs
+docker compose run --rm pipeline python -m llm.evaluate  # evaluate the LLM extraction
 ```
+
+For the LLM, copy `.env.example` to `.env` and fill it in. Without it,
+everything still runs with the keyword-rules extractor.
 
 Output lands in `data/`, `mlflow.db` and `mlruns/` on your machine.
 
@@ -231,8 +305,12 @@ src/
     train.py             step 3: train, evaluate, log to MLflow, register
   api/
     features.py          step 4: raw claim -> model features (mirrors gold.py)
-    main.py              step 4: FastAPI app, loads @champion at startup
-tests/                   49 tests: pipeline rules, model, skew test, API
+    main.py              step 4/5: FastAPI app, loads @champion at startup, /claims/triage
+  llm/
+    schema.py            step 5: the fields to extract, with their rules
+    extract.py           step 5: fake (keyword) and LLM extractors
+    evaluate.py          step 5: 29 labelled cases, results to MLflow
+tests/                   72 tests: pipeline rules, model, skew test, API, LLM
 ```
 
 ## The data

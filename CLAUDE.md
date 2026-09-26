@@ -46,8 +46,8 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 | 2    | PySpark bronze / silver / gold + quality rules, quarantine, quality gate (`src/pipeline/`) | done     |
 | 3    | Fraud-risk model on `data/gold/fraud_features`, tracked with MLflow (`src/model/`)         | done     |
 | 4    | FastAPI service that scores a claim, in Docker (`src/api/`)                                | done     |
-| 5    | LLM extracts damage type and urgency from the claim description                            | **next** |
-| 6    | GitHub Actions: tests and Docker build on every push                                       |          |
+| 5    | LLM extracts damage type and urgency from the claim description (`src/llm/`)               | done     |
+| 6    | GitHub Actions: tests and Docker build on every push                                       | **next** |
 | 7    | Run the pipeline on Databricks Free Edition (Delta tables, `--format delta`)               |          |
 
 ## Step 3 as built (notes for step 4)
@@ -145,7 +145,26 @@ Worth explaining:
   deploy, several API replicas behind a load balancer (Kubernetes), health
   checks.
 
-## Step 5 plan: LLM reads the claim description
+## Step 5 as built (notes for step 6)
+
+- LLM: Ollama on Elvis's Windows host (CPU only), reached from Docker at
+  `http://host.docker.internal:11434/v1`. Models: qwen2.5:3b (best), gemma3:1b,
+  qwen2.5:0.5b. Settings in `.env` (git- and docker-ignored), names in
+  `.env.example`. Compose loads it with `env_file` `required: false`.
+- `src/llm/extract.py`: `FakeExtractor` (keywords from the generator templates
+  only), `LLMExtractor` (openai package, temperature 0, json_schema response
+  format, pydantic validation, one retry that includes the error, fallback with
+  `needs_manual_review`, sha256 cache, openai `max_retries=0`), `get_extractor()`
+  picks the LLM only when `LLM_API_KEY` and `LLM_MODEL` are set.
+- `src/llm/evaluate.py`: 29 cases (first 18 = templates, checked by a test),
+  MLflow experiment `claims-llm-extraction`, `PROMPT_VERSION = "v1"`, untimed
+  warm-up call. Results table is in the README.
+- CI must not call an LLM: without `.env` there is no `LLM_API_KEY`, so the fake
+  extractor is used. `tests/test_api.py` also removes `LLM_API_KEY`.
+- Don't tune the prompt or keywords on the 29 eval cases; a v2 prompt needs a
+  separate held-out set.
+
+## Step 5 original plan: LLM reads the claim description
 
 Goal: turn the free-text description ("Burst pipe in the bathroom flooded the
 hallway.") into structured fields a claims handler can route on. This covers
