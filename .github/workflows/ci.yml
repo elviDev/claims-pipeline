@@ -1,0 +1,77 @@
+# CI: on every push and pull request, run all the tests, then build the image.
+#
+#   test    build the Docker image and run pytest inside it, with no network
+#   docker  build the image tagged with the commit, only if the tests passed
+#
+# Tests run inside our own image (not setup-python + setup-java) so CI uses
+# exactly the environment we use locally: the same Python, Java and package
+# versions, all set by the Dockerfile. It also proves the image itself works.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Push twice in a row and the run for the older commit gets cancelled.
+# Only the latest commit's result matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The workflow can read the code and nothing else. CI gets the fewest rights it needs.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # Buildx is Docker's builder that can save and reuse layers from GitHub's cache
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          tags: claims-pipeline:ci
+          load: true                    # keep the image on this machine so we can run it
+          # Most of the build time is `pip install` (pyspark, mlflow, ...). That
+          # layer only changes when requirements.txt does, so it's saved in
+          # GitHub's cache and reused. mode=max saves every layer, not just the last.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --network none: the container can't reach anything outside itself, so
+      # no test can call Ollama, OpenAI or any other paid API, whatever the code
+      # does. Spark only talks to itself inside the container, so it still works.
+      # --hostname localhost: with no network, Docker doesn't list the
+      # container's own name in /etc/hosts, and Java (so Spark) fails to start
+      # when it can't look up its own hostname. "localhost" always resolves.
+      # There's also no .env here, so the app uses the fake extractor.
+      - name: Run the tests (no network)
+        run: docker run --rm --network none --hostname localhost claims-pipeline:ci pytest
+
+  docker:
+    name: Docker image
+    needs: test                         # only if every test passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      # The image as it would be released, tagged with the commit it came from.
+      # Build only for now. In a real setup, this is where it would be pushed
+      # to a registry (e.g. AWS ECR), and only ever for a commit whose tests passed.
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          tags: claims-pipeline:${{ github.sha }}
+          push: false
+          cache-from: type=gha

@@ -1,5 +1,7 @@
 # Insurance Claims Data Pipeline
 
+[![CI](https://github.com/elviDev/claims-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/elviDev/claims-pipeline/actions/workflows/ci.yml)
+
 An end-to-end data and ML pipeline for insurance claims: raw data in, validated
 tables, a fraud-risk model, an LLM that reads claim descriptions, and an API
 that serves it all. Built to practise the stack used by data engineering teams
@@ -16,7 +18,7 @@ in insurance (Spark / Databricks, MLflow, Docker, CI/CD, LLMs).
 | 3 | Fraud-risk model, tracked with MLflow | ✅ |
 | 4 | FastAPI service that scores a claim, running in Docker | ✅ |
 | 5 | LLM step: extract damage type and urgency from the claim description | ✅ |
-| 6 | GitHub Actions: tests and Docker build on every push | ⏳ |
+| 6 | GitHub Actions: tests and Docker build on every push | ✅ |
 | 7 | Run the pipeline on Databricks | ⏳ |
 
 ## How the pipeline works
@@ -249,6 +251,28 @@ docker compose run --rm pipeline python -m llm.evaluate                   # mode
 docker compose run --rm -e LLM_MODEL=gemma3:1b pipeline python -m llm.evaluate
 ```
 
+## CI
+
+Every push and pull request runs `.github/workflows/ci.yml` on GitHub Actions:
+
+1. **Tests.** Builds the Docker image and runs all 72 tests inside it. The
+   tests use the same image as local development, so CI checks the real
+   environment (Python, Java, package versions) and not a copy of it. The
+   container runs with **no network**, so no test can call Ollama, OpenAI or
+   anything else outside it; the LLM tests use the fake extractor or a stand-in
+   client. There is no `.env` in CI.
+2. **Docker image.** Only if every test passed, builds the image tagged with
+   the commit. Build only for now; in a real setup this is the step that pushes
+   the image to a registry, so only tested code ever gets released.
+
+Docker layers are cached between runs, so the slow `pip install` layer is only
+rebuilt when `requirements.txt` changes.
+
+Why it matters: a change that breaks the quality rules, the model, the
+Spark-vs-API feature match (the skew test) or the API shows up as a red cross
+on the commit, before anyone deploys it. The badge at the top shows the result
+for the latest commit on `main`.
+
 ## Running it
 
 ### With Docker (recommended, works the same on Windows, Mac and Linux)
@@ -311,6 +335,7 @@ src/
     extract.py           step 5: fake (keyword) and LLM extractors
     evaluate.py          step 5: 29 labelled cases, results to MLflow
 tests/                   72 tests: pipeline rules, model, skew test, API, LLM
+.github/workflows/ci.yml step 6: tests + Docker build on every push
 ```
 
 ## The data

@@ -14,6 +14,23 @@ from pipeline.silver import build_silver_claims, build_silver_policies
 from pipeline.spark import get_spark
 
 
+@pytest.fixture(scope="session", autouse=True)
+def no_real_llm():
+    """
+    Tests must never call a real LLM: they have to be fast, free, work offline
+    and give the same result every time. Inside the container, .env gets loaded,
+    so we clear the LLM settings for the whole test session. Every extractor
+    is then the fake one, unless a test builds an LLMExtractor on purpose
+    with a stand-in client.
+
+    CI adds a second guard: it runs pytest with no network at all.
+    """
+    with pytest.MonkeyPatch.context() as env:
+        for name in ("LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL"):
+            env.delenv(name, raising=False)
+        yield
+
+
 @pytest.fixture(scope="session")
 def spark():
     """One Spark session shared by all tests (starting Spark takes a few seconds)."""

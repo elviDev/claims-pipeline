@@ -47,8 +47,8 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 | 3    | Fraud-risk model on `data/gold/fraud_features`, tracked with MLflow (`src/model/`)         | done     |
 | 4    | FastAPI service that scores a claim, in Docker (`src/api/`)                                | done     |
 | 5    | LLM extracts damage type and urgency from the claim description (`src/llm/`)               | done     |
-| 6    | GitHub Actions: tests and Docker build on every push                                       | **next** |
-| 7    | Run the pipeline on Databricks Free Edition (Delta tables, `--format delta`)               |          |
+| 6    | GitHub Actions: tests and Docker build on every push (`.github/workflows/ci.yml`)          | done     |
+| 7    | Run the pipeline on Databricks Free Edition (Delta tables, `--format delta`)               | **next** |
 
 ## Step 3 as built (notes for step 4)
 
@@ -144,6 +144,21 @@ Worth explaining:
   instead of a local sqlite file, the model baked into the image or pulled at
   deploy, several API replicas behind a load balancer (Kubernetes), health
   checks.
+
+## Step 6 as built
+
+- `.github/workflows/ci.yml`: job `test` builds the image with buildx (GHA layer
+  cache, `mode=max`) and runs `docker run --network none --hostname localhost
+  claims-pipeline:ci pytest`; job `docker` (`needs: test`) builds the image
+  tagged with the commit SHA, no push. `concurrency` cancels older runs on the
+  same ref; `permissions: contents: read`.
+- `--hostname localhost` is required with `--network none`: otherwise Java
+  can't resolve the container hostname and Spark fails to start.
+- `tests/conftest.py` has a session-wide autouse fixture that clears
+  `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL`, so no test uses a real LLM even
+  when `.env` is loaded locally.
+- `.dockerignore` excludes `.env` and `mlflow.db`.
+- The `gh` CLI is not installed on Elvis's machine; check runs in the browser.
 
 ## Step 5 as built (notes for step 6)
 

@@ -50,9 +50,8 @@ def client(trained_registry):
     with pytest.MonkeyPatch.context() as env:
         env.setenv("MLFLOW_TRACKING_URI", trained_registry.tracking_uri)
         env.setenv("MODEL_URI", DEFAULT_MODEL_URI)
-        # .env is loaded inside the container. Remove the key so the API uses
-        # the fake extractor: tests must never call a real LLM.
-        env.delenv("LLM_API_KEY", raising=False)
+        # No LLM settings here: conftest.py clears them for every test, so
+        # the API picks the fake extractor.
         with TestClient(app) as test_client:
             yield test_client
     mlflow.set_tracking_uri(None)
