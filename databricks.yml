@@ -1,0 +1,67 @@
+# Databricks Asset Bundle: the claims job, defined as code.
+#
+# The same job you can click together in the Jobs UI (generate -> pipeline ->
+# train), but in git: reviewed like any other change, and deployed the same
+# way every time, to any workspace.
+#
+#   databricks bundle validate           check this file
+#   databricks bundle deploy             upload the code and create/update the job
+#   databricks bundle run claims_job     start a run and follow it
+#
+# Deploy uploads this folder (minus what .gitignore lists) to your workspace,
+# under /Workspace/Users/<you>/.bundle/claims-pipeline/dev/files. The notebooks
+# find src/ relative to themselves, so they work from there too.
+
+bundle:
+  name: claims-pipeline
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for the tables and the model
+    default: workspace
+  schema:
+    description: Schema inside the catalog
+    default: claims
+
+resources:
+  jobs:
+    claims_job:
+      name: claims-pipeline
+
+      # Passed to every task. Each notebook reads them with dbutils.widgets.
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+
+      # No compute settings: the tasks run on serverless compute (the only kind
+      # on Free Edition, and the simplest anywhere).
+      tasks:
+        - task_key: generate
+          notebook_task:
+            notebook_path: ./notebooks/01_generate.py
+
+        - task_key: pipeline
+          depends_on:
+            - task_key: generate
+          notebook_task:
+            notebook_path: ./notebooks/02_pipeline.py
+
+        # Only runs if the pipeline passed, including its quality gate
+        - task_key: train
+          depends_on:
+            - task_key: pipeline
+          notebook_task:
+            notebook_path: ./notebooks/03_train.py
+
+targets:
+  dev:
+    default: true
+    # Development mode: the job is named "[dev <you>] claims-pipeline", only
+    # you can see it, and any schedule is paused. Safe to deploy and redeploy.
+    mode: development
+    # The workspace comes from your CLI login (databricks auth login). To pin
+    # it here instead, uncomment and use your workspace URL:
+    # workspace:
+    #   host: https://<your-workspace>.cloud.databricks.com

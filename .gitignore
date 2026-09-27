@@ -6,3 +6,4 @@ data/
 mlruns/
 .env
 mlflow.db
+.databricks/

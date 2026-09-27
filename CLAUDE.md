@@ -48,7 +48,7 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
 | 4    | FastAPI service that scores a claim, in Docker (`src/api/`)                                | done     |
 | 5    | LLM extracts damage type and urgency from the claim description (`src/llm/`)               | done     |
 | 6    | GitHub Actions: tests and Docker build on every push (`.github/workflows/ci.yml`)          | done     |
-| 7    | Run the pipeline on Databricks Free Edition (Delta tables, `--format delta`)               | **next** |
+| 7    | Run the pipeline on Databricks Free Edition (`notebooks/`, `databricks.yml`)               | done     |
 
 ## Step 3 as built (notes for step 4)
 
@@ -144,6 +144,28 @@ Worth explaining:
   instead of a local sqlite file, the model baked into the image or pulled at
   deploy, several API replicas behind a load balancer (Kubernetes), health
   checks.
+
+## Step 7 as built
+
+- `src/pipeline/storage.py`: `Storage("path", "data")` (local default) or
+  `Storage("table", "workspace.claims")` -> tables `<catalog>.<schema>.<layer>_<name>`
+  via `saveAsTable` (with `overwriteSchema`) / `spark.table`.
+- `run_pipeline.run(storage, raw_dir, spark=None)`; CLI `--tables workspace.claims`
+  (raw dir defaults to `/Volumes/<catalog>/<schema>/raw`). No `.cache()`: gold
+  reads silver policies back from storage.
+- `get_spark()` returns `SparkSession.builder.getOrCreate()` when
+  `DATABRICKS_RUNTIME_VERSION` is set. Notebooks pass their own `spark`.
+- `train.run(features, ..., experiment=, model_name=, registry_uri=, source=)`
+  accepts a DataFrame; defaults unchanged for local use.
+- Notebooks find `src` as `os.path.dirname(os.getcwd()) + "/src"` (works in the
+  Git folder and in a bundle deployment). `03_train` pins mlflow 3.16.1,
+  scikit-learn 1.9.1, skops 0.16.0 with `%pip`, then restarts Python.
+- `databricks.yml`: job `claims_job` (generate -> pipeline -> train), serverless,
+  job parameters `catalog`/`schema`, target `dev` in development mode.
+- Verified locally: table mode end to end against `spark_catalog.claims`, and
+  the `04_explore` SQL (except Delta-only `DESCRIBE HISTORY` / `VERSION AS OF`).
+  NOT verified: anything on Databricks itself (serverless, UC registry, bundle).
+- Roadmap complete. Demo day: 21 October 2026.
 
 ## Step 6 as built
 

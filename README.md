@@ -7,7 +7,7 @@ tables, a fraud-risk model, an LLM that reads claim descriptions, and an API
 that serves it all. Built to practise the stack used by data engineering teams
 in insurance (Spark / Databricks, MLflow, Docker, CI/CD, LLMs).
 
-> Work in progress. Built step by step, one working piece at a time.
+> Built step by step, one working piece at a time. Runs locally in Docker and on Databricks.
 
 ## Roadmap
 
@@ -19,7 +19,7 @@ in insurance (Spark / Databricks, MLflow, Docker, CI/CD, LLMs).
 | 4 | FastAPI service that scores a claim, running in Docker | ✅ |
 | 5 | LLM step: extract damage type and urgency from the claim description | ✅ |
 | 6 | GitHub Actions: tests and Docker build on every push | ✅ |
-| 7 | Run the pipeline on Databricks | ⏳ |
+| 7 | Run the pipeline on Databricks | ✅ |
 
 ## How the pipeline works
 
@@ -273,6 +273,61 @@ Spark-vs-API feature match (the skew test) or the API shows up as a red cross
 on the commit, before anyone deploys it. The badge at the top shows the result
 for the latest commit on `main`.
 
+## Running on Databricks
+
+The same code runs on Databricks Free Edition (serverless compute, Unity
+Catalog). Only the storage changes: each medallion layer becomes a managed
+**Delta table** in Unity Catalog instead of a parquet folder.
+
+| | Local | Databricks |
+|---|---|---|
+| Raw CSVs | `data/raw/` | volume `/Volumes/workspace/claims/raw/` |
+| Bronze / silver / quarantine / gold | parquet folders under `data/` | tables `workspace.claims.bronze_claims`, `silver_claims`, `quarantine_claims`, `gold_claims_monthly`, `gold_fraud_features` (+ policies) |
+| Table format | parquet | Delta (all-or-nothing writes, version history) |
+| MLflow runs | `mlflow.db` | the workspace, experiment `/Users/<you>/claims-fraud` |
+| Model registry | local SQLite | Unity Catalog: `workspace.claims.claims_fraud_model@champion` |
+
+`src/pipeline/storage.py` is the only place that knows the difference: the
+pipeline says "write this as silver / claims", and `Storage` turns that into a
+folder or a table name. `get_spark()` returns the existing session on
+Databricks, and nothing uses `.cache()` (serverless doesn't support it): each
+layer is read back from the stored layer before it. Table mode is tested
+locally against Spark's own catalog, so CI covers it too.
+
+**Notebooks** (`notebooks/`, Databricks source format, all logic stays in `src/`):
+
+| Notebook | What it does |
+|---|---|
+| `00_setup` | creates schema `workspace.claims` and volume `raw` (run once) |
+| `01_generate` | generates the synthetic CSVs into the volume |
+| `02_pipeline` | runs bronze → silver → gold as tables, shows the quality report |
+| `03_train` | trains the model, logs to MLflow, registers it in Unity Catalog |
+| `04_explore` | SQL on the gold tables: fraud rate by product, monthly cost, quarantine reasons, Delta history |
+
+**The Job** runs `01_generate → 02_pipeline → 03_train` as dependent tasks on
+serverless compute. If the quality gate fails, `02_pipeline` fails and training
+is skipped, so a model never trains on a broken load. The job is also defined
+as code in `databricks.yml` (a Databricks Asset Bundle):
+
+```bash
+databricks auth login --host https://<your-workspace-url>
+databricks bundle validate
+databricks bundle deploy            # uploads the code, creates "[dev <you>] claims-pipeline"
+databricks bundle run claims_job    # runs it and follows progress
+```
+
+<!-- Screenshot: the job run graph (generate -> pipeline -> train, all green)
+![Databricks job run](docs/images/databricks-job-run.png)
+-->
+
+<!-- Screenshot: the tables in Catalog Explorer (workspace > claims)
+![Tables in Catalog Explorer](docs/images/databricks-catalog-tables.png)
+-->
+
+<!-- Screenshot: the registered model with its champion alias
+![Model in Unity Catalog](docs/images/databricks-model-registry.png)
+-->
+
 ## Running it
 
 ### With Docker (recommended, works the same on Windows, Mac and Linux)
@@ -319,7 +374,8 @@ PYTHONPATH=src uvicorn api.main:app --port 8000
 src/
   generate_claims.py     step 1: synthetic data
   pipeline/
-    spark.py             Spark session settings
+    spark.py             Spark session settings (local, or the Databricks session)
+    storage.py           step 7: parquet folders locally, Unity Catalog tables on Databricks
     bronze.py            raw ingestion
     quality.py           rule engine: apply rules, split valid/quarantine, report
     silver.py            cleaning + the rules for policies and claims
@@ -334,7 +390,9 @@ src/
     schema.py            step 5: the fields to extract, with their rules
     extract.py           step 5: fake (keyword) and LLM extractors
     evaluate.py          step 5: 29 labelled cases, results to MLflow
-tests/                   72 tests: pipeline rules, model, skew test, API, LLM
+notebooks/               step 7: Databricks notebooks (setup, generate, pipeline, train, explore)
+databricks.yml           step 7: the Databricks job as code (Asset Bundle)
+tests/                   85 tests: pipeline rules, storage, model, skew test, API, LLM
 .github/workflows/ci.yml step 6: tests + Docker build on every push
 ```
 

@@ -19,6 +19,7 @@ from model.train import (
     fraud_scores,
     load_features,
     pick_threshold,
+    run,
     split,
 )
 
@@ -116,3 +117,24 @@ def test_champion_has_medians_that_rebuild_the_gold_feature(trained, data):
 
     rebuilt = (data["claim_amount"] / data["product"].map(medians)).round(3)
     assert (rebuilt == data["amount_vs_product_median"]).all()
+
+
+def test_run_the_way_databricks_calls_it(features_path, tmp_path, monkeypatch):
+    """
+    notebooks/03_train.py passes the gold table as a DataFrame, plus its own
+    experiment and model names. Same call here, with a local registry
+    standing in for Databricks and Unity Catalog.
+    """
+    monkeypatch.chdir(tmp_path)                 # MLflow writes mlruns/ into the current folder
+    tracking_uri = f"sqlite:///{tmp_path}/mlflow.db"
+    try:
+        run(pd.read_parquet(features_path), review_rate=0.1, tracking_uri=tracking_uri,
+            experiment="/Users/someone/claims-fraud", model_name="claims_fraud_model",
+            source="workspace.claims.gold_fraud_features")
+        client = mlflow.MlflowClient()
+        version = client.get_model_version_by_alias("claims_fraud_model", CHAMPION_ALIAS)
+        run_info = client.get_run(version.run_id)
+        assert client.get_experiment(run_info.info.experiment_id).name == "/Users/someone/claims-fraud"
+        assert run_info.inputs.dataset_inputs[0].dataset.source.find("gold_fraud_features") >= 0
+    finally:
+        mlflow.set_tracking_uri(None)

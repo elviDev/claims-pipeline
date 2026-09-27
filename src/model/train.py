@@ -76,7 +76,16 @@ TARGET = "is_fraud"
 
 def load_features(path: str | Path) -> pd.DataFrame:
     """Read the gold table. Spark wrote a folder of parquet files, pandas reads the whole folder."""
-    df = pd.read_parquet(path)
+    return prepare_features(pd.read_parquet(path))
+
+
+def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Check and type the gold features, wherever they came from: a parquet
+    folder locally, or a Unity Catalog table on Databricks
+    (spark.table(...).toPandas()). Same checks, same types, either way.
+    """
+    df = df.copy()
     missing = set(FEATURES + [TARGET]) - set(df.columns)
     if missing:
         # Fail loudly here, not with a confusing error deep inside scikit-learn
@@ -350,7 +359,8 @@ def train_and_log(name: str, data: pd.DataFrame, features_path: str, review_rate
     return model_info.model_uri, metrics
 
 
-def register_best(results: dict[str, tuple[str, dict]], review_rate: float) -> tuple[str, str]:
+def register_best(results: dict[str, tuple[str, dict]], review_rate: float,
+                  model_name: str = REGISTERED_MODEL) -> tuple[str, str]:
     """
     Register the model with the best PR AUC and point the "champion" alias at it.
 
@@ -361,41 +371,63 @@ def register_best(results: dict[str, tuple[str, dict]], review_rate: float) -> t
     best_name = max(results, key=lambda name: results[name][1]["pr_auc"])
     model_uri, metrics = results[best_name]
 
-    version = mlflow.register_model(model_uri, REGISTERED_MODEL)
+    version = mlflow.register_model(model_uri, model_name)
 
     client = MlflowClient()
-    client.set_registered_model_alias(REGISTERED_MODEL, CHAMPION_ALIAS, version.version)
+    client.set_registered_model_alias(model_name, CHAMPION_ALIAS, version.version)
     # The flag/don't-flag threshold belongs with the model: the API needs both.
-    client.set_model_version_tag(REGISTERED_MODEL, version.version, "threshold", str(metrics["threshold"]))
-    client.set_model_version_tag(REGISTERED_MODEL, version.version, "review_rate", str(review_rate))
-    client.set_model_version_tag(REGISTERED_MODEL, version.version, "model_type", best_name)
+    client.set_model_version_tag(model_name, version.version, "threshold", str(metrics["threshold"]))
+    client.set_model_version_tag(model_name, version.version, "review_rate", str(review_rate))
+    client.set_model_version_tag(model_name, version.version, "model_type", best_name)
 
     return best_name, version.version
 
 
 def run(
-    features_path: str | Path = "data/gold/fraud_features",
+    features: str | Path | pd.DataFrame = "data/gold/fraud_features",
     review_rate: float = DEFAULT_REVIEW_RATE,
     tracking_uri: str = DEFAULT_TRACKING_URI,
+    *,
+    experiment: str = EXPERIMENT,
+    model_name: str = REGISTERED_MODEL,
+    registry_uri: str | None = None,
+    source: str | None = None,
 ) -> dict:
-    """Train every model, log each run, register the best. Returns the test metrics per model."""
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment(EXPERIMENT)
+    """
+    Train every model, log each run, register the best. Returns the test metrics per model.
 
-    data = load_features(features_path)
+    The defaults are the local setup. On Databricks (notebooks/03_train.py):
+      features      the gold table as a pandas DataFrame
+      tracking_uri  "databricks"
+      experiment    a workspace path, e.g. "/Users/you@example.com/claims-fraud"
+      registry_uri  "databricks-uc", so the model is registered in Unity Catalog
+      model_name    catalog.schema.model, e.g. "workspace.claims.claims_fraud_model"
+      source        where the DataFrame came from, e.g. the table name (logged with each run)
+    """
+    mlflow.set_tracking_uri(tracking_uri)
+    if registry_uri:
+        mlflow.set_registry_uri(registry_uri)
+    mlflow.set_experiment(experiment)
+
+    if isinstance(features, pd.DataFrame):
+        data = prepare_features(features)
+        features_path = source or "dataframe"
+    else:
+        data = load_features(features)
+        features_path = str(features)
     print(f"Loaded {len(data):,} claims, fraud rate {data[TARGET].mean():.1%}")
 
     results = {}
     for name in MODEL_PARAMS:
         print(f"Training {name}...")
-        results[name] = train_and_log(name, data, str(features_path), review_rate)
+        results[name] = train_and_log(name, data, features_path, review_rate)
 
-    best_name, version = register_best(results, review_rate)
+    best_name, version = register_best(results, review_rate, model_name)
 
     print(f"\nTest set results (flagging the riskiest {review_rate:.0%} of claims):")
     for name, (_, metrics) in results.items():
         print(f"  {name:24s} " + "  ".join(f"{k}={metrics[k]:.3f}" for k in ["roc_auc", "pr_auc", "precision", "recall"]))
-    print(f"\nRegistered {best_name} as {REGISTERED_MODEL} version {version} (@{CHAMPION_ALIAS})")
+    print(f"\nRegistered {best_name} as {model_name} version {version} (@{CHAMPION_ALIAS})")
 
     return {name: metrics for name, (_, metrics) in results.items()}
 
