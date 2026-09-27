@@ -19,6 +19,7 @@ from model.train import (
     fraud_scores,
     load_features,
     pick_threshold,
+    prepare_features,
     run,
     split,
 )
@@ -45,6 +46,23 @@ def test_load_features_fails_clearly_on_missing_column(tmp_path, data):
     data.drop(columns=["report_delay_days"]).to_parquet(tmp_path / "broken.parquet")
     with pytest.raises(ValueError, match="report_delay_days"):
         load_features(tmp_path / "broken.parquet")
+
+
+def test_split_does_not_depend_on_row_order(features_path):
+    """
+    Spark returns rows in no fixed order (it differed between local and
+    Databricks). The same claims must give the same train/test split anyway,
+    or the same data and seed give different scores in different places.
+    """
+    raw = pd.read_parquet(features_path)
+    shuffled = raw.sample(frac=1, random_state=1)
+
+    def test_claim_ids(df):
+        prepared = prepare_features(df)
+        _, X_test, _, _ = split(prepared)
+        return prepared.loc[X_test.index, "claim_id"].tolist()
+
+    assert test_claim_ids(raw) == test_claim_ids(shuffled)
 
 
 def test_split_keeps_fraud_rate(data):

@@ -95,19 +95,33 @@ Results on the held-out test set (3,901 claims, 127 of them fraud):
 
 | Model | ROC AUC | PR AUC | Precision | Recall | Accuracy |
 |-------|---------|--------|-----------|--------|----------|
-| Logistic regression (baseline) | 0.646 | 0.081 | 10.4% | 16.5% | 92.6% |
-| **Gradient boosting** (registered) | 0.637 | **0.102** | **13.9%** | **21.3%** | 93.1% |
+| Logistic regression (baseline) | 0.659 | 0.081 | 11.9% | 21.3% | 92.3% |
+| **Gradient boosting** (registered) | **0.681** | **0.119** | **14.3%** | 21.3% | 93.3% |
 | Never flag anything | | 0.033 | | 0% | 96.7% |
 
-Reviewing 5% of claims, the tree model catches about 21% of fraud, roughly 4x
+Reviewing about 5% of claims, the tree model catches 21% of fraud, roughly 4x
 better than picking claims at random. When it flags a claim, it's right 14% of
-the time, against a 3.3% base rate.
+the time, against a 3.3% base rate. Both models catch the same number of fraud
+cases, but the tree model gets there flagging fewer honest customers, and it
+ranks fraud higher overall (PR AUC 0.119 vs 0.081).
 
 **Why the scores aren't higher.** The generator labels a claim as fraud from
-three red flags plus random chance, and 56% of fraud cases have no red flag at
-all. Scoring the test set with the exact formula that created the labels gives
-ROC AUC 0.656 and PR AUC 0.089, so the models are already at the ceiling this
-data allows.
+three red flags plus random chance, and 49% of the test set's fraud cases have
+no red flag at all. Scoring the test set with the exact formula that created
+the labels gives ROC AUC 0.697 and PR AUC 0.121, so the tree model is already
+at the ceiling this data allows.
+
+**Reproducible across environments.** Spark doesn't return rows in a fixed
+order, and the same table came back in a different order on Databricks than
+locally. Since the train/test split picks rows by position, the same data and
+seed gave different scores. The features are now sorted by `claim_id` before
+the split, and a test checks that shuffled input gives the same split.
+
+**How much to trust one split.** Shuffling the rows before that fix moved the
+tree model's PR AUC between 0.093 and 0.118, just from which 127 fraud cases
+landed in the test set. That's as big as the gap between the two models. With
+fraud this rare, the next improvement would be cross-validation: score on
+several splits and report the average and the spread.
 
 **Known shortcut.** `amount_vs_product_median` is computed over all claims
 before the train/test split, so the test set has a small influence on a
@@ -142,7 +156,7 @@ curl -X POST localhost:8000/score -H "Content-Type: application/json" -d '{
 ```
 
 ```json
-{"claim_id": "CLM-DEMO-1", "fraud_score": 0.882, "flag_for_review": true, "threshold": 0.7588, "model_version": "3"}
+{"claim_id": "CLM-DEMO-1", "fraud_score": 0.8309, "flag_for_review": true, "threshold": 0.7487, "model_version": "4"}
 ```
 
 | Endpoint | What it does |
@@ -255,7 +269,7 @@ docker compose run --rm -e LLM_MODEL=gemma3:1b pipeline python -m llm.evaluate
 
 Every push and pull request runs `.github/workflows/ci.yml` on GitHub Actions:
 
-1. **Tests.** Builds the Docker image and runs all 72 tests inside it. The
+1. **Tests.** Builds the Docker image and runs all 86 tests inside it. The
    tests use the same image as local development, so CI checks the real
    environment (Python, Java, package versions) and not a copy of it. The
    container runs with **no network**, so no test can call Ollama, OpenAI or
@@ -392,7 +406,7 @@ src/
     evaluate.py          step 5: 29 labelled cases, results to MLflow
 notebooks/               step 7: Databricks notebooks (setup, generate, pipeline, train, explore)
 databricks.yml           step 7: the Databricks job as code (Asset Bundle)
-tests/                   85 tests: pipeline rules, storage, model, skew test, API, LLM
+tests/                   86 tests: pipeline rules, storage, model, skew test, API, LLM
 .github/workflows/ci.yml step 6: tests + Docker build on every push
 ```
 

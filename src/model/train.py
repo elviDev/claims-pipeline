@@ -95,7 +95,13 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     # input contract (the MLflow signature) is built from these types, and a
     # whole-number column would make the API reject 40.0 or a missing value.
     df[NUMERIC] = df[NUMERIC].astype("float64")
-    return df
+
+    # Put the rows in a fixed order. Spark doesn't promise any row order: the
+    # same table came back in one order locally and another on Databricks.
+    # train_test_split picks rows by position, so a different order means a
+    # different test set, and different scores from the same data and seed.
+    # Sorted by claim_id, the split depends only on WHICH claims there are.
+    return df.sort_values("claim_id").reset_index(drop=True)
 
 
 def product_medians(df: pd.DataFrame) -> dict[str, float]:

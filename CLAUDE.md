@@ -65,8 +65,13 @@ Previously an Application Engineer at a bank. Newer to Spark and MLOps.
   extra type the tree model needs.
 - Scores come from `predict_proba` with `class_weight="balanced"`, so they rank
   well but are not calibrated probabilities.
-- Model scores are close to the ceiling of the generated data (56% of fraud has
-  no red flag). Oracle ROC AUC 0.656 / PR AUC 0.089 on the test set.
+- Model scores are close to the ceiling of the generated data (49% of test-set
+  fraud has no red flag). Oracle ROC AUC 0.697 / PR AUC 0.121 on the test set.
+- `prepare_features` sorts by `claim_id` so the split doesn't depend on Spark's
+  row order (it differed between local and Databricks). Current local results:
+  LR PR AUC 0.081, tree 0.119 (champion version 4, threshold 0.7487). A single
+  split is noisy (0.093-0.118 depending on row order); cross-validation is the
+  next improvement.
 
 ## Step 4 as built (notes for step 5)
 
