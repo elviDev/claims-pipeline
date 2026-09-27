@@ -330,17 +330,20 @@ databricks bundle deploy            # uploads the code, creates "[dev <you>] cla
 databricks bundle run claims_job    # runs it and follows progress
 ```
 
-<!-- Screenshot: the job run graph (generate -> pipeline -> train, all green)
+The job run: three dependent tasks on serverless compute, 3 minutes end to end.
+
 ![Databricks job run](docs/images/databricks-job-run.png)
--->
 
-<!-- Screenshot: the tables in Catalog Explorer (workspace > claims)
+The schema in Catalog Explorer: the 8 medallion tables, the `raw` volume and the model.
+
 ![Tables in Catalog Explorer](docs/images/databricks-catalog-tables.png)
--->
 
-<!-- Screenshot: the registered model with its champion alias
+The model in Unity Catalog: one version per training run, `@champion` on the latest.
+
 ![Model in Unity Catalog](docs/images/databricks-model-registry.png)
--->
+
+Training on Databricks gives the same scores as locally, to three decimals (see
+"Reproducible across environments" above).
 
 ## Running it
 

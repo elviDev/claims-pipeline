@@ -169,7 +169,13 @@ Worth explaining:
   job parameters `catalog`/`schema`, target `dev` in development mode.
 - Verified locally: table mode end to end against `spark_catalog.claims`, and
   the `04_explore` SQL (except Delta-only `DESCRIBE HISTORY` / `VERSION AS OF`).
-  NOT verified: anything on Databricks itself (serverless, UC registry, bundle).
+- Verified on Databricks Free Edition (28 Sep 2026): notebooks 00 to 04 all ran;
+  the pipeline gave the same counts as local (19,502 clean, 498 quarantined,
+  200 duplicates); after the claim_id sort fix, training on Databricks matched
+  local to 3 decimals (tree PR AUC 0.119). The hand-made Job (generate ->
+  pipeline -> train, serverless) succeeded in 3m 9s. Harmless warnings:
+  MLflow `getContext().extraContext()` tag warning, `wcwidth` version notice.
+  NOT verified: the Asset Bundle (`databricks bundle deploy`).
 - Roadmap complete. Demo day: 21 October 2026.
 
 ## Step 6 as built
